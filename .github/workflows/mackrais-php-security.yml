@@ -1,0 +1,115 @@
+name: MackRais PHP security images
+
+on:
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: Publish verified images to GHCR
+                type: boolean
+                default: false
+                required: true
+
+permissions:
+    contents: read
+
+concurrency:
+    group: mackrais-php-security
+    cancel-in-progress: false
+
+env:
+    IMAGE: ghcr.io/mackrais/pimcore
+    PHP_VERSION: '8.5.12'
+
+jobs:
+    build:
+        if: github.repository == 'mackrais/docker'
+        runs-on: ${{ matrix.platform.runner }}
+        timeout-minutes: 90
+        permissions:
+            contents: read
+            packages: write
+        strategy:
+            fail-fast: false
+            matrix:
+                platform:
+                    - { runner: ubuntu-24.04, arch: amd64 }
+                    - { runner: ubuntu-24.04-arm, arch: arm64 }
+                variant: [max, supervisord]
+        env:
+            ARCH: ${{ matrix.platform.arch }}
+            VARIANT: ${{ matrix.variant }}
+        steps:
+            - uses: actions/checkout@v5
+              with:
+                  persist-credentials: false
+            - uses: docker/setup-buildx-action@v4
+            - name: Build with the patched PHP base
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  image="${IMAGE}:php${PHP_VERSION}-${VARIANT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+                  echo "BUILT_IMAGE=${image}" >> "$GITHUB_ENV"
+                  docker buildx build --pull --load \
+                    --platform "linux/${ARCH}" \
+                    --build-arg "PHP_VERSION=${PHP_VERSION}" \
+                    --build-arg DEBIAN_VERSION=trixie \
+                    --target "pimcore_php_${VARIANT}" \
+                    --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+                    --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                    --tag "$image" .
+            - name: Verify PHP, FPM and extensions before publishing
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  docker run --rm "$BUILT_IMAGE" php -r '
+                    if (PHP_VERSION !== $argv[1]) {
+                        fwrite(STDERR, "Unexpected PHP version: " . PHP_VERSION . PHP_EOL);
+                        exit(1);
+                    }
+                    $extensions = ["amqp", "bcmath", "exif", "gd", "intl", "pcntl", "pdo_mysql", "sockets", "zip", "apcu", "imagick", "redis"];
+                    if ($argv[2] === "max") { $extensions[] = "soap"; }
+                    foreach ($extensions as $extension) {
+                        if (!extension_loaded($extension)) {
+                            fwrite(STDERR, "Missing extension: " . $extension . PHP_EOL);
+                            exit(1);
+                        }
+                    }
+                    echo "Verified PHP " . PHP_VERSION . PHP_EOL;
+                  ' "$PHP_VERSION" "$VARIANT"
+                  docker run --rm "$BUILT_IMAGE" php-fpm -v | grep -F "PHP ${PHP_VERSION} (fpm-fcgi)"
+                  docker run --rm "$BUILT_IMAGE" php-fpm -t
+                  docker run --rm "$BUILT_IMAGE" composer --version
+                  if [[ "$VARIANT" == supervisord ]]; then
+                    docker run --rm "$BUILT_IMAGE" supervisord --version
+                  fi
+            - name: Publish verified architecture image
+              if: inputs.publish
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+                  docker push "$BUILT_IMAGE"
+
+    publish:
+        needs: build
+        if: inputs.publish && github.repository == 'mackrais/docker'
+        runs-on: ubuntu-24.04
+        permissions:
+            packages: write
+        steps:
+            - uses: docker/setup-buildx-action@v4
+            - name: Publish multi-platform tags after every check passed
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+                  for variant in max supervisord; do
+                    tag="${IMAGE}:php${PHP_VERSION}-${variant}-5.x"
+                    source="${IMAGE}:php${PHP_VERSION}-${variant}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+                    docker buildx imagetools create --tag "$tag" "${source}-amd64" "${source}-arm64"
+                    docker buildx imagetools inspect "$tag" | tee -a "$GITHUB_STEP_SUMMARY"
+                  done
