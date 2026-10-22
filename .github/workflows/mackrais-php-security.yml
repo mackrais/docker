@@ -47,8 +47,8 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
-                  image="${IMAGE}:php${PHP_VERSION}-${VARIANT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
-                  echo "BUILT_IMAGE=${image}" >> "$GITHUB_ENV"
+                  build_tag="${IMAGE}:php${PHP_VERSION}-${VARIANT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+                  echo "BUILT_IMAGE=${build_tag}" >> "$GITHUB_ENV"
                   docker buildx build --pull --load \
                     --platform "linux/${ARCH}" \
                     --build-arg "PHP_VERSION=${PHP_VERSION}" \
@@ -56,7 +56,7 @@ jobs:
                     --target "pimcore_php_${VARIANT}" \
                     --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
                     --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-                    --tag "$image" .
+                    --tag "$build_tag" .
             - name: Verify PHP, FPM and extensions before publishing
               shell: bash
               run: |
